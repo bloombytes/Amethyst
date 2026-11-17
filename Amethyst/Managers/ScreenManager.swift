@@ -30,6 +30,7 @@ final class ScreenManager<Delegate: ScreenManagerDelegate>: NSObject, Codable {
 
     enum CodingKeys: String, CodingKey {
         case layoutsBySpaceUUID
+        case currentLayoutKeyBySpaceUUID
     }
 
     weak var delegate: Delegate?
@@ -52,7 +53,9 @@ final class ScreenManager<Delegate: ScreenManagerDelegate>: NSObject, Codable {
     private let reflowOperationQueue = OperationQueue()
 
     private var layouts: [Layout<Window>] = []
-    private var currentLayoutIndexBySpaceUUID: [String: Int] = [:]
+    /// The selected layout for each space, stored by layout key rather than index so it stays correct if the
+    /// configured layout list is reordered between launches.
+    private var currentLayoutKeyBySpaceUUID: [String: String] = [:]
     private var layoutsBySpaceUUID: [String: [Layout<Window>]] = [:]
     private var currentLayoutIndex: Int = 0
     var previousLayoutKey: String?
@@ -98,6 +101,8 @@ final class ScreenManager<Delegate: ScreenManagerDelegate>: NSObject, Codable {
         self.layoutsBySpaceUUID = try layoutsBySpaceUUID.mapValues { keyedLayouts -> [Layout<Window>] in
             return try ScreenManager<Delegate>.decodedLayouts(from: keyedLayouts, userConfiguration: UserConfiguration.shared)
         }
+        // Older encodings don't include the selected layouts, so fall back to the default layout for every space.
+        self.currentLayoutKeyBySpaceUUID = try values.decodeIfPresent([String: String].self, forKey: .currentLayoutKeyBySpaceUUID) ?? [:]
 
         layoutNameWindowController = LayoutNameWindowController(windowNibName: "LayoutNameWindow")
     }
@@ -149,6 +154,13 @@ final class ScreenManager<Delegate: ScreenManagerDelegate>: NSObject, Codable {
             }
         }
         try values.encode(layoutsBySpaceUUID, forKey: .layoutsBySpaceUUID)
+
+        // The selection for the active space is only recorded when switching away from it, so include it here.
+        var currentLayoutKeyBySpaceUUID = self.currentLayoutKeyBySpaceUUID
+        if let space = space, let currentLayoutKey = currentLayout?.layoutKey {
+            currentLayoutKeyBySpaceUUID[space.uuid] = currentLayoutKey
+        }
+        try values.encode(currentLayoutKeyBySpaceUUID, forKey: .currentLayoutKeyBySpaceUUID)
     }
 
     func updateScreen(to screen: Screen) {
@@ -156,20 +168,24 @@ final class ScreenManager<Delegate: ScreenManagerDelegate>: NSObject, Codable {
     }
 
     func updateSpace(to space: Space) {
-        if let currentSpace = self.space {
-            currentLayoutIndexBySpaceUUID[currentSpace.uuid] = currentLayoutIndex
+        if let currentSpace = self.space, let currentLayoutKey = currentLayout?.layoutKey {
+            currentLayoutKeyBySpaceUUID[currentSpace.uuid] = currentLayoutKey
         }
 
         self.space = space
 
-        setCurrentLayoutIndex(currentLayoutIndexBySpaceUUID[space.uuid] ?? 0, changingSpace: true)
-
+        // Load the new space's layouts before resolving the selected layout, so the index refers to this space's list.
         if let layouts = layoutsBySpaceUUID[space.uuid] {
             self.layouts = layouts
         } else {
             self.layouts = LayoutType.layoutsWithConfiguration(userConfiguration)
             layoutsBySpaceUUID[space.uuid] = layouts
         }
+
+        let selectedLayoutIndex = currentLayoutKeyBySpaceUUID[space.uuid].flatMap { layoutKey in
+            layouts.firstIndex { $0.layoutKey == layoutKey }
+        }
+        setCurrentLayoutIndex(selectedLayoutIndex ?? 0, changingSpace: true)
     }
 
     func distributeEvent(_ change: Change<Window>) {
